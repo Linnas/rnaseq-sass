@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Plotly + theming variables (used in chart components) */
+:root {
+  --plot-fg: #e5e7eb;      /* base-200 */
+  --plot-axis: #9ca3af;    /* base-400 */
+  --plot-grid: #334155;    /* slate-700-ish */
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  @apply bg-base-950 text-base-100 antialiased;
+}
+
+/* Focus styles (highly visible, accessible) */
+:where(button, a, input, select, textarea) {
+  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-accent-400 focus-visible:ring-offset-base-950;
+}
+
+/* Accessible link treatment */
+a {
+  @apply underline decoration-accent-400/50 decoration-2 underline-offset-4 hover:decoration-accent-400;
+}
+
+/* Card primitive */
+.card {
+  @apply bg-base-900/90 border border-base-700 rounded-xl shadow-card;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
