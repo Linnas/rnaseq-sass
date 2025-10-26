@@ -7,9 +7,8 @@ suppressPackageStartupMessages({
   library(tidyr)
   library(stringr)
   library(fs)
-  library(mime)
   library(DBI)
-  library(fs)
+  library(mime)
   library(RSQLite)
   library(callr)
   library(DESeq2)
@@ -25,7 +24,7 @@ dir_create(DATA_DIR)
 # --- sqlite for jobs ---
 db_path <- file.path(DATA_DIR, "jobs.sqlite")
 con <- dbConnect(RSQLite::SQLite(), db_path)
-dbExecute(con, "PRAGMA journal_mode=WAL;") 
+
 dbExecute(con, "CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   status TEXT,
@@ -57,13 +56,13 @@ launch_job <- function(id, workdir, design_col, db_path) {
       }
 
       tryCatch({
-        upd("running","DESeq2 starting")
+        upd("running", "DESeq2 starting")
 
         counts <- readr::read_csv(file.path(workdir, "counts.csv"), show_col_types = FALSE)
         meta   <- readr::read_csv(file.path(workdir, "metadata.csv"), show_col_types = FALSE)
 
         if (!("gene" %in% names(counts))) names(counts)[1] <- "gene"
-        rownames_mat <- counts$gene
+
         count_mat <- counts |> dplyr::select(-gene)
         count_mat[] <- lapply(count_mat, function(v) as.integer(round(v)))
         count_mat <- as.matrix(data.frame(count_mat, check.names = FALSE))
@@ -75,12 +74,15 @@ launch_job <- function(id, workdir, design_col, db_path) {
         count_mat <- count_mat[, keep, drop=FALSE]
         meta <- meta[keep, , drop=FALSE]
 
-        if (!(design_col %in% colnames(meta))) stop(paste("design_col not in metadata:", design_col))
+        if (!(design_col %in% colnames(meta))) 
+          stop(paste("design_col not in metadata:", design_col))
         meta[[design_col]] <- factor(meta[[design_col]])
 
-        dds <- DESeq2::DESeqDataSetFromMatrix(countData = count_mat, colData = meta, design = as.formula(paste("~", design_col)))
+        design_formula <- as.formula(paste("~", design_col))
+        dds <- DESeq2::DESeqDataSetFromMatrix(countData = count_mat, 
+                                               colData = meta, 
+                                               design = design_formula)
         dds <- dds[rowSums(counts(dds)) > 5, ]
-        rownames(dds) <- rownames_mat[match(rownames(dds), rownames_mat, nomatch=0)]
         dds <- DESeq2::DESeq(dds, quiet = TRUE)
 
         saveRDS(dds, file.path(workdir, "dds.rds"))
@@ -100,7 +102,6 @@ launch_job <- function(id, workdir, design_col, db_path) {
   if (!inherits(bg, "try-error")) {
     return(TRUE)  # background started OK
   }
-
   FALSE
 }
 
@@ -237,7 +238,7 @@ function(req, res) {
 #* @post /jobs
 function(req, res){
   # Prefer explicit multipart parse; fall back to req$files for older setups
-  mp <- tryCatch(mime::parse_multipart(req), error = function(e) NULL)
+  mp <- tryCatch(parse_multipart(req), error = function(e) NULL)
 
   get_dp <- function(name) {
     # Try parsed multipart
@@ -264,59 +265,55 @@ function(req, res){
   file.copy(counts_dp,   file.path(workdir, "counts.csv"))
   file.copy(metadata_dp, file.path(workdir, "metadata.csv"))
 
-  # allow design_col from multipart text if user posted it there
-  if (!is.null(mp) && !is.null(mp$design_col)) {
-    design_col <- mp$design_col
-  }
-
+  design_col <- if (!is.null(mp) && !is.null(mp$design_col)) mp$design_col else "condition"
   touch_job(id, "queued", "Job created", workdir = workdir, design_col = design_col)
 
-  tryCatch({rx <- r_bg(function(args){
-    library(DESeq2); library(readr); library(dplyr); library(DBI); library(RSQLite); library(fs); library(tibble)
-    id <- args$id; workdir <- args$workdir; design_col <- args$design_col; db_path <- args$db_path
-    con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
-    upd <- function(status, message=NULL) {
-      now <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
-      DBI::dbExecute(con, "UPDATE jobs SET status=?, message=?, updated_at=? WHERE id=?",
-                     params = list(status, message, now, id))
-    }
-    upd("running","DESeq2 starting in child process")
+  # callr::r_bg(function(args){
+  #   library(DESeq2); library(readr); library(dplyr); library(DBI); library(RSQLite); library(fs); library(tibble)
+  #   id <- args$id; workdir <- args$workdir; design_col <- args$design_col; db_path <- args$db_path
+  #   con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
+  #   upd <- function(status, message=NULL) {
+  #     now <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
+  #     DBI::dbExecute(con, "UPDATE jobs SET status=?, message=?, updated_at=? WHERE id=?",
+  #                    params = list(status, message, now, id))
+  #   }
+  #   upd("running","DESeq2 starting in child process")
 
-    counts <- readr::read_csv(file.path(workdir, "counts.csv"), show_col_types = FALSE)
-    meta   <- readr::read_csv(file.path(workdir, "metadata.csv"), show_col_types = FALSE)
+  #   counts <- readr::read_csv(file.path(workdir, "counts.csv"), show_col_types = FALSE)
+  #   meta   <- readr::read_csv(file.path(workdir, "metadata.csv"), show_col_types = FALSE)
 
-    if (!("gene" %in% names(counts))) names(counts)[1] <- "gene"
-    rownames_mat <- counts$gene
-    count_mat <- counts |> select(-gene)
-    count_mat[] <- lapply(count_mat, function(v) as.integer(round(v)))
-    count_mat <- as.matrix(data.frame(count_mat, check.names = FALSE))
+  #   if (!("gene" %in% names(counts))) names(counts)[1] <- "gene"
+  #   rownames_mat <- counts$gene
+  #   count_mat <- counts |> select(-gene)
+  #   count_mat[] <- lapply(count_mat, function(v) as.integer(round(v)))
+  #   count_mat <- as.matrix(data.frame(count_mat, check.names = FALSE))
 
-    if (!("sample" %in% names(meta))) names(meta)[1] <- "sample"
-    rownames(meta) <- meta$sample
+  #   if (!("sample" %in% names(meta))) names(meta)[1] <- "sample"
+  #   rownames(meta) <- meta$sample
 
-    keep <- intersect(colnames(count_mat), rownames(meta))
-    count_mat <- count_mat[, keep, drop=FALSE]
-    meta <- meta[keep, , drop=FALSE]
+  #   keep <- intersect(colnames(count_mat), rownames(meta))
+  #   count_mat <- count_mat[, keep, drop=FALSE]
+  #   meta <- meta[keep, , drop=FALSE]
 
-    if (!(design_col %in% colnames(meta))) stop(paste("design_col not in metadata:", design_col))
-    meta[[design_col]] <- factor(meta[[design_col]])
+  #   if (!(design_col %in% colnames(meta))) 
+  #     stop(paste("design_col not in metadata:", design_col))
+  #   meta[[design_col]] <- factor(meta[[design_col]])
 
-    dds <- DESeqDataSetFromMatrix(countData = count_mat, colData = meta, design = as.formula(paste("~", design_col)))
-    dds <- dds[rowSums(counts(dds)) > 5, ]
-    rownames(dds) <- rownames_mat[match(rownames(dds), rownames_mat, nomatch=0)]
-    dds <- DESeq(dds, quiet = TRUE)
+  #   design_formula <- as.formula(paste("~", design_col))
+  #   dds <- DESeqDataSetFromMatrix(countData = count_mat, 
+  #                                  colData = meta, 
+  #                                  design = design_formula)
+  #   dds <- dds[rowSums(counts(dds)) > 5, ]
+  #   dds <- DESeq(dds, quiet = TRUE)
 
-    saveRDS(dds, file.path(workdir, "dds.rds"))
-    readr::write_csv(meta, file.path(workdir, "samples_used.csv"))
-    upd("completed","Ready for parameterized results")
-    DBI::dbDisconnect(con)
-  }, args = list(id=id, workdir=workdir, design_col=design_col, db_path=db_path))
-}, error = function(e) {
-  print(e)
-  upd("failed", paste("Error:", conditionMessage(e)))
-  list(job_id = id, status = "failed")
-})
-
+  #   saveRDS(dds, file.path(workdir, "dds.rds"))
+  #   readr::write_csv(meta, file.path(workdir, "samples_used.csv"))
+  #   upd("completed","Ready for parameterized results")
+  #   DBI::dbDisconnect(con)
+  # }, args = list(id=id, workdir=workdir, design_col=design_col, db_path=db_path),
+  #    stdout = "|", stderr = "|")
+  started_bg <- launch_job(id, workdir, design_col, db_path)
+  list(job_id = id, status = if (started_bg) "queued" else "failed")
 }
 
 # ------------- Status -------------
