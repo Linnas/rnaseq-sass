@@ -29,6 +29,8 @@ export default function Home() {
   const [params, setParams] = useState({ padj_cutoff: 0.05, lfc_thresh: 1, top_n: 100, item_limit: 10000, a: "", b: "" });
   const [results, setResults] = useState<Results | null>(null);
 
+  const PAGE_SIZE = 15;
+  const [page, setPage] = useState(0);
   const [enrichMode, setEnrichMode] = useState<"ora"|"gsea">("ora");
   const [goOnt, setGoOnt] = useState<"BP"|"MF"|"CC">("BP");
   const [organism, setOrganism] = useState<OrgKey>("hsa");
@@ -70,6 +72,13 @@ export default function Home() {
     const r = await getResults(jobId, qs);
     setResults(r);
   }
+
+  useEffect(() => {
+    if (!results) { setPage(0); return; }
+    const total = Math.min(params.top_n ?? (results.top_table?.length ?? 0), results.top_table?.length ?? 0);
+    const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (page >= pageCount) setPage(0);
+  }, [results, params.top_n]);
 
   async function fetchGO() {
     if (!jobId || status !== "completed") return;
@@ -147,24 +156,27 @@ export default function Home() {
               className="mt-2 block w-full rounded-lg border-base-700 bg-base-800 file:mr-3 file:rounded-md file:border-0 file:bg-base-700 file:px-3 file:py-2 file:text-base-100 hover:file:bg-base-600"
             />
           </div>
-          <div className="md:col-span-1">
-            <label className="block text-sm font-medium text-base-200" htmlFor="design_col">Design column</label>
-            <input
-              id="design_col" name="design_col" defaultValue="condition"
-              className="mt-2 block w-full rounded-lg border-base-700 bg-base-800 text-base-100 placeholder-base-400"
-            />
-            <p id="upload-help" className="mt-2 text-xs text-base-400">
-              The design column must exist in metadata and define your contrast groups (e.g., <code>condition</code>).
-            </p>
-          </div>
-          <div className="md:col-span-1 flex items-end">
-            <button
-              type="submit"
-              className="inline-flex items-center justify-center rounded-lg bg-accent-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-accent-500 focus-visible:ring-accent-300 disabled:opacity-60 disabled:cursor-not-allowed"
-              disabled={status === "running" || status === "queued"}
-            >
-              Start Job
-            </button>
+          <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-[1fr_1fr] gap-3">
+            <div>
+              <label className="block text-sm font-medium text-base-200" htmlFor="design_col">Design column</label>
+              <input
+                id="design_col" name="design_col" defaultValue="condition"
+                className="mt-2 block w-full rounded-lg border-base-700 bg-base-800 text-base-100 placeholder-base-400"
+                aria-describedby="upload-help"
+              />
+              <p id="upload-help" className="mt-2 text-xs text-base-400">
+                The design column must exist in metadata and define your contrast groups (e.g., <code>condition</code>).
+              </p>
+            </div>
+            <div className="flex items-center sm:justify-left">
+              <button
+                type="submit"
+                className="mt-2 rounded-lg bg-accent-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-accent-500 focus-visible:ring-accent-300 disabled:opacity-60 disabled:cursor-not-allowed"
+                disabled={status === "running" || status === "queued"}
+              >
+                Start Job
+              </button>
+            </div>
           </div>
         </form>
 
@@ -262,11 +274,20 @@ export default function Home() {
       </section>
 
       {/* Plots */}
-      <section className="grid gap-6 md:grid-cols-2 mb-8" aria-label="Diagnostic plots">
+      <section className="space-y-6 mb-8" aria-label="Diagnostic plots">
         <div className="card p-5 md:p-6">
           <h2 className="text-lg font-semibold text-base-50">Volcano</h2>
           <div className="mt-3" role="img" aria-label="Volcano plot">
-            {results ? <VolcanoPlot data={results.volcano} /> : <Placeholder />}
+            {results ? (
+              <VolcanoPlot
+                data={results.volcano}
+                padjCutoff={params.padj_cutoff}
+                lfcThresh={params.lfc_thresh}
+                itemLimit={params.item_limit}
+              />
+            ) : (
+              <Placeholder />
+            )}
           </div>
         </div>
         <div className="card p-5 md:p-6">
@@ -279,30 +300,69 @@ export default function Home() {
         {/* Top table */}
         <div className="md:col-span-2 card p-5 md:p-6">
           <h2 className="text-lg font-semibold text-base-50">Top genes</h2>
-          <div className="mt-3 overflow-auto">
-            {results && results.top_table?.length > 0 ? (
-              <table className="min-w-full text-sm">
-                <thead className="bg-base-800 text-base-100">
-                  <tr>
-                    {Object.keys(results.top_table[0]).map((k) => (
-                      <th key={k} scope="col" className="px-3 py-2 text-left font-semibold">
-                        {k}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="[&_tr:nth-child(even)]:bg-base-900/60">
-                  {results.top_table.map((row, i) => (
-                    <tr key={i} className="border-t border-base-800">
-                      {Object.entries(row).map(([k, v]) => (
-                        <td key={k} className="px-3 py-2 text-base-200">{String(v)}</td>
+          {results && results.top_table?.length > 0 ? (() => {
+            const allRows = results.top_table;
+            const capped  = allRows.slice(0, params.top_n ?? allRows.length);
+            const pageCount = Math.max(1, Math.ceil(capped.length / PAGE_SIZE));
+            const start = page * PAGE_SIZE;
+            const end   = Math.min(start + PAGE_SIZE, capped.length);
+            const visible = capped.slice(start, end);
+
+            return (
+              <>
+                <div className="mt-3 overflow-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-base-800 text-base-100">
+                      <tr>
+                        {Object.keys(visible[0] ?? {}).map((k) => (
+                          <th key={k} scope="col" className="px-3 py-2 text-left font-semibold">
+                            {k}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="[&_tr:nth-child(even)]:bg-base-900/60">
+                      {visible.map((row, i) => (
+                        <tr key={i} className="border-t border-base-800">
+                          {Object.entries(row).map(([k, v]) => (
+                            <td key={k} className="px-3 py-2 text-base-200">{String(v)}</td>
+                          ))}
+                        </tr>
                       ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : <Placeholder />}
-          </div>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination controls */}
+                <div className="mt-4 flex items-center justify-between">
+                  <p className="text-xs text-base-400">
+                    Showing {capped.length ? start + 1 : 0}–{end} of {capped.length}
+                  </p>
+                  <div className="inline-flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPage(p => Math.max(0, p - 1))}
+                      disabled={page === 0}
+                      className="rounded-md bg-base-800 px-3 py-1.5 text-sm text-base-100 disabled:opacity-50"
+                      aria-label="Previous page"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-sm text-base-200">Page {page + 1} / {pageCount}</span>
+                    <button
+                      type="button"
+                      onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
+                      disabled={page >= pageCount - 1}
+                      className="rounded-md bg-base-800 px-3 py-1.5 text-sm text-base-100 disabled:opacity-50"
+                      aria-label="Next page"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              </>
+            );
+          })() : <Placeholder />}
         </div>
       </section>
 
@@ -324,7 +384,7 @@ export default function Home() {
           />
         </div>
 
-        <div className="mt-5 grid gap-6 md:grid-cols-2">
+        <div className="mt-5 space-y-6">
           {/* GO */}
           <div>
             <PanelHeader

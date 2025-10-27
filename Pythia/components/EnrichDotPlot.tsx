@@ -14,10 +14,10 @@ export default function EnrichDotPlot({ items, title }:{ items: Item[]; title: s
         text: items.map(i => `${i.term}`),
         type: "scatter",
         mode: "markers",
-        marker: { size: items.map(i => i.count), color: items.map(i => i.neglog10padj), showscale: true, colorbar: { title: "-log10(padj)" } },
+        marker: { size: items.map(i => i.count), color: items.map(i => i.neglog10padj), showscale: true, colorbar: { title: { text: "-log10(padj)" } } },
         hovertemplate: "%{y}<br>GeneRatio: %{x:.2f}<br>Count: %{marker.size}<br>-log10(padj): %{marker.color:.2f}<extra>%{text}</extra>"
-      }]}
-      layout={{ title, xaxis: { title: "GeneRatio" }, yaxis: { title: "Term", automargin: true } }}
+      }] as any}
+      layout={{ title: { text: title }, xaxis: { title: { text: "GeneRatio" } }, yaxis: { title: { text: "" }, automargin: true } } as any}
       config={{ displaylogo: false, responsive: true, toImageButtonOptions: { filename: "enrich_dotplot" } }}
       style={{ width: "100%", height: 520 }}
     />

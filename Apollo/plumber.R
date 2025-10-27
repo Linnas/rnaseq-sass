@@ -61,28 +61,83 @@ launch_job <- function(id, workdir, design_col, db_path) {
         counts <- readr::read_csv(file.path(workdir, "counts.csv"), show_col_types = FALSE)
         meta   <- readr::read_csv(file.path(workdir, "metadata.csv"), show_col_types = FALSE)
 
+        # --- enforce expected column names
         if (!("gene" %in% names(counts))) names(counts)[1] <- "gene"
+        if (!("sample" %in% names(meta)))  names(meta)[1]  <- "sample"
 
-        count_mat <- counts |> dplyr::select(-gene)
-        count_mat[] <- lapply(count_mat, function(v) as.integer(round(v)))
-        count_mat <- as.matrix(data.frame(count_mat, check.names = FALSE))
+        # --- clean 'gene' column and drop blank/NA genes
+        counts <- counts |>
+          dplyr::mutate(gene = as.character(gene)) |>
+          dplyr::filter(!is.na(gene) & gene != "")
 
-        if (!("sample" %in% names(meta))) names(meta)[1] <- "sample"
-        rownames(meta) <- meta$sample
+        # sample columns (must match metadata$sample)
+        sample_cols <- setdiff(names(counts), "gene")
 
-        keep <- intersect(colnames(count_mat), rownames(meta))
-        count_mat <- count_mat[, keep, drop=FALSE]
-        meta <- meta[keep, , drop=FALSE]
+        # --- align metadata to counts (and verify all present)
+        meta$sample <- as.character(meta$sample)
+        missing_in_meta <- setdiff(sample_cols, meta$sample)
+        if (length(missing_in_meta) > 0) {
+          stop(paste0("These count columns are missing in metadata$sample: ",
+                      paste(missing_in_meta, collapse = ", ")))
+        }
+        meta <- meta[match(sample_cols, meta$sample), , drop = FALSE]
 
-        if (!(design_col %in% colnames(meta))) 
-          stop(paste("design_col not in metadata:", design_col))
+        # --- numerify & sanitize counts BEFORE aggregation
+        for (nm in sample_cols) {
+          x <- suppressWarnings(as.numeric(counts[[nm]]))
+          # Treat non-finite (NA/NaN/Inf) as 0 counts
+          bad <- !is.finite(x)
+          if (any(bad)) {
+            # optional: write a line to job.log if you want to see how many got fixed
+            try(write(sprintf("[sanitize] column=%s replaced %d non-finite values with 0", nm, sum(bad)),
+                      file=file.path(workdir,"job.log"), append=TRUE), silent=TRUE)
+            x[bad] <- 0
+          }
+          # no negative counts
+          neg <- x < 0
+          if (any(neg)) {
+            try(write(sprintf("[sanitize] column=%s clamped %d negative values to 0", nm, sum(neg)),
+                      file=file.path(workdir,"job.log"), append=TRUE), silent=TRUE)
+            x[neg] <- 0
+          }
+          counts[[nm]] <- x
+        }
+
+        # --- aggregate duplicate genes by sum (integer)
+        counts_sum <- counts |>
+          dplyr::select(dplyr::all_of(c("gene", sample_cols))) |>
+          dplyr::group_by(gene) |>
+          dplyr::summarise(
+            dplyr::across(
+              dplyr::all_of(sample_cols),
+              ~ as.integer(round(sum(., na.rm = TRUE)))
+            ),
+            .groups = "drop"
+          )
+
+        # --- build integer matrix with proper rownames
+        count_mat <- as.matrix(counts_sum[, sample_cols, drop = FALSE])
+        rownames(count_mat) <- counts_sum$gene
+        storage.mode(count_mat) <- "integer"
+
+        # final guardrails (hard fail if anything slipped through)
+        if (!all(is.finite(count_mat))) stop("Sanitization failed: non-finite in count_mat")
+        if (any(count_mat < 0))         stop("Sanitization failed: negative values in count_mat")
+
+        # --- design checks
+        if (!(design_col %in% colnames(meta))) stop(paste("design_col not in metadata:", design_col))
         meta[[design_col]] <- factor(meta[[design_col]])
+        if (nlevels(meta[[design_col]]) < 2) stop(paste("design_col", design_col, "has fewer than 2 levels"))
 
-        design_formula <- as.formula(paste("~", design_col))
-        dds <- DESeq2::DESeqDataSetFromMatrix(countData = count_mat, 
-                                               colData = meta, 
-                                               design = design_formula)
-        dds <- dds[rowSums(counts(dds)) > 5, ]
+        # --- DESeq2
+        dds <- DESeq2::DESeqDataSetFromMatrix(countData = count_mat,
+                                              colData   = meta,
+                                              design    = stats::as.formula(paste("~", design_col)))
+
+        # light prefilter (speed/stability)
+        keep <- rowSums(DESeq2::counts(dds) >= 10) >= 2
+        dds  <- dds[keep, , drop = FALSE]
+        if (nrow(dds) == 0) stop("No genes left after filtering (>=10 counts in >=2 samples).")
         dds <- DESeq2::DESeq(dds, quiet = TRUE)
 
         saveRDS(dds, file.path(workdir, "dds.rds"))
@@ -211,12 +266,12 @@ fmt_enrich_df_for_plots <- function(df, top=20) {
   df <- head(df, top)
   items <- lapply(seq_len(nrow(df)), function(i) {
     list(
-      term = as.character(df$ID[i] %||% df$Description[i]),
-      description = as.character(df$Description[i]),
-      count = as.integer(df$Count[i] %||% 0),
-      gene_ratio = unname(as.numeric(df$gene_ratio[i] %||% 0)),
-      p_adjust = unname(as.numeric(df$p.adjust[i] %||% df$pvalue[i] %||% NA)),
-      neglog10padj = unname(as.numeric(df$neglog10padj[i] %||% 0))
+      term = jsonlite::unbox(as.character(df$ID[i] %||% df$Description[i])),
+      description = jsonlite::unbox(as.character(df$Description[i])),
+      count = jsonlite::unbox(as.integer(df$Count[i] %||% 0)),
+      gene_ratio = jsonlite::unbox(unname(as.numeric(df$gene_ratio[i] %||% 0))),
+      p_adjust = jsonlite::unbox(unname(as.numeric(df$p.adjust[i] %||% df$pvalue[i] %||% NA))),
+      neglog10padj = jsonlite::unbox(unname(as.numeric(df$neglog10padj[i] %||% 0)))
     )
   })
   list(items = items)
@@ -268,52 +323,10 @@ function(req, res){
   design_col <- if (!is.null(mp) && !is.null(mp$design_col)) mp$design_col else "condition"
   touch_job(id, "queued", "Job created", workdir = workdir, design_col = design_col)
 
-  # callr::r_bg(function(args){
-  #   library(DESeq2); library(readr); library(dplyr); library(DBI); library(RSQLite); library(fs); library(tibble)
-  #   id <- args$id; workdir <- args$workdir; design_col <- args$design_col; db_path <- args$db_path
-  #   con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
-  #   upd <- function(status, message=NULL) {
-  #     now <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
-  #     DBI::dbExecute(con, "UPDATE jobs SET status=?, message=?, updated_at=? WHERE id=?",
-  #                    params = list(status, message, now, id))
-  #   }
-  #   upd("running","DESeq2 starting in child process")
-
-  #   counts <- readr::read_csv(file.path(workdir, "counts.csv"), show_col_types = FALSE)
-  #   meta   <- readr::read_csv(file.path(workdir, "metadata.csv"), show_col_types = FALSE)
-
-  #   if (!("gene" %in% names(counts))) names(counts)[1] <- "gene"
-  #   rownames_mat <- counts$gene
-  #   count_mat <- counts |> select(-gene)
-  #   count_mat[] <- lapply(count_mat, function(v) as.integer(round(v)))
-  #   count_mat <- as.matrix(data.frame(count_mat, check.names = FALSE))
-
-  #   if (!("sample" %in% names(meta))) names(meta)[1] <- "sample"
-  #   rownames(meta) <- meta$sample
-
-  #   keep <- intersect(colnames(count_mat), rownames(meta))
-  #   count_mat <- count_mat[, keep, drop=FALSE]
-  #   meta <- meta[keep, , drop=FALSE]
-
-  #   if (!(design_col %in% colnames(meta))) 
-  #     stop(paste("design_col not in metadata:", design_col))
-  #   meta[[design_col]] <- factor(meta[[design_col]])
-
-  #   design_formula <- as.formula(paste("~", design_col))
-  #   dds <- DESeqDataSetFromMatrix(countData = count_mat, 
-  #                                  colData = meta, 
-  #                                  design = design_formula)
-  #   dds <- dds[rowSums(counts(dds)) > 5, ]
-  #   dds <- DESeq(dds, quiet = TRUE)
-
-  #   saveRDS(dds, file.path(workdir, "dds.rds"))
-  #   readr::write_csv(meta, file.path(workdir, "samples_used.csv"))
-  #   upd("completed","Ready for parameterized results")
-  #   DBI::dbDisconnect(con)
-  # }, args = list(id=id, workdir=workdir, design_col=design_col, db_path=db_path),
-  #    stdout = "|", stderr = "|")
   started_bg <- launch_job(id, workdir, design_col, db_path)
-  list(job_id = id, status = if (started_bg) "queued" else "failed")
+  list(
+    job_id = jsonlite::unbox(id), 
+    status = jsonlite::unbox(if (started_bg) "queued" else "failed"))
 }
 
 # ------------- Status -------------
@@ -321,7 +334,11 @@ function(req, res){
 function(id){
   job <- get_job(id)
   if (is.null(job)) return(list(error="Not found"))
-  list(job_id=job$id, status=job$status, message=job$message, design_col=job$design_col)
+  list(
+    job_id=jsonlite::unbox(job$id), 
+    status=jsonlite::unbox(job$status), 
+    message=jsonlite::unbox(job$message), 
+    design_col=jsonlite::unbox(job$design_col))
 }
 
 # ------------- Results -------------

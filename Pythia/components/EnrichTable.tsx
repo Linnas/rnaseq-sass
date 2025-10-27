@@ -42,11 +42,11 @@ export default function EnrichTable({ items }: { items: Item[] }) {
         <tbody>
           {data.map((r,i) => (
             <tr key={i}>
-              <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{r.description}</td>
-              <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{r.count}</td>
-              <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{r.gene_ratio.toFixed(3)}</td>
-              <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{Number.isFinite(r.p_adjust) ? (r.p_adjust as number).toExponential(2) : "NA"}</td>
-              <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{r.neglog10padj.toFixed(2)}</td>
+              <td style={{ padding: 6, borderBottom: "1px solid #f0f0f0" }}>{r.description}</td>
+              <td style={{ padding: 6, borderBottom: "1px solid #f0f0f0" }}>{r.count}</td>
+              <td style={{ padding: 6, borderBottom: "1px solid #f0f0f0" }}>{r.gene_ratio.toFixed(3)}</td>
+              <td style={{ padding: 6, borderBottom: "1px solid #f0f0f0" }}>{Number.isFinite(r.p_adjust) ? (r.p_adjust as number).toExponential(2) : "NA"}</td>
+              <td style={{ padding: 6, borderBottom: "1px solid #f0f0f0" }}>{r.neglog10padj.toFixed(2)}</td>
             </tr>
           ))}
         </tbody>
